@@ -11,6 +11,22 @@ export function createScene(engine, canvas) {
     let isGameStarted = false; 
     let isPaused = false;
 
+    // --- IA : ÉTATS DES ENNEMIS (FSM) ---
+    const EnemyState = {
+        PATROL: 'patrol',
+        CHASE: 'chase',
+        FLANK: 'flank',
+        CHARGE: 'charge'
+    };
+
+    function getRandomPatrolTarget() {
+        return new BABYLON.Vector3(
+            (Math.random() * 60) - 30,
+            0,
+            (Math.random() * 60) - 30
+        );
+    }
+
     /* ================= 1. ENVIRONNEMENT ================= */
     scene.clearColor = new BABYLON.Color3(0.53, 0.80, 0.92); 
     scene.fogMode = BABYLON.Scene.FOGMODE_EXP;
@@ -34,7 +50,6 @@ export function createScene(engine, canvas) {
     ground.receiveShadows = true;
 
     // --- SONS LOCAUX ---
-    // Les chemins pointent vers le dossier "public/sounds" (Vite sert `public/` à la racine)
     let shootLoaded = false;
     let bonusLoaded = false;
 
@@ -46,7 +61,6 @@ export function createScene(engine, canvas) {
         bonusLoaded = true;
     }, { volume: 1.0, spatialSound: false });
 
-    // Fallback: HTMLAudioElement (helps when BABYLON.Sound/audio context isn't ready)
     const shootAudioEl = new Audio('/sounds/shoot.mp3');
     shootAudioEl.preload = 'auto';
     shootAudioEl.addEventListener('canplaythrough', () => {});
@@ -57,7 +71,6 @@ export function createScene(engine, canvas) {
     bonusAudioEl.addEventListener('canplaythrough', () => {});
     bonusAudioEl.addEventListener('error', (e) => {});
 
-    // Quick network accessibility check (HEAD) to show 200/404 in console
     try {
     fetch('/sounds/shoot.mp3', { method: 'HEAD' }).then(() => {}).catch(() => {});
     fetch('/sounds/bonus.mp3', { method: 'HEAD' }).then(() => {}).catch(() => {});
@@ -65,7 +78,6 @@ export function createScene(engine, canvas) {
         // silent
     }
 
-    // Fonction pour débloquer l'AudioContext et primer les éléments audio lors d'un geste utilisateur
     function unlockAudioContext() {
         try {
             const engineObj = scene.getEngine && scene.getEngine();
@@ -75,14 +87,11 @@ export function createScene(engine, canvas) {
                 if (audioCtx.state === 'suspended') {
                     audioCtx.resume().catch(() => {});
                 }
-            } else {
-                // no audio context available
             }
         } catch (e) {
             // silent
         }
 
-        // Prime HTMLAudioElements: play then pause immediately (user gesture allows it)
         try {
             shootAudioEl && shootAudioEl.play().then(() => { shootAudioEl.pause(); shootAudioEl.currentTime = 0; }).catch(() => {});
             bonusAudioEl && bonusAudioEl.play().then(() => { bonusAudioEl.pause(); bonusAudioEl.currentTime = 0; }).catch(() => {});
@@ -94,7 +103,6 @@ export function createScene(engine, canvas) {
         window.removeEventListener('keydown', unlockAudioContext);
     }
 
-    // Écoute la première interaction globale pour tenter le resume
     window.addEventListener('pointerdown', unlockAudioContext);
     window.addEventListener('keydown', unlockAudioContext);
 
@@ -210,13 +218,12 @@ export function createScene(engine, canvas) {
     let speedBoostActive = false;
     let enemiesFrozen = false;
 
-    // --- VARIABLES DE PHYSIQUE DU TANK ---
     let tankVelocity = 0;      
     let tankTurnVelocity = 0;  
 
     let dashActive = false;
     let dashCooldown = 0;
-    const DASH_DURATION = 0.7; // J'ai légèrement allongé le dash pour qu'il soit plus visible
+    const DASH_DURATION = 0.7;
     const DASH_COOLDOWN = 5.0;
     let dashTimer = 0;
     let dashParticles = null;
@@ -614,29 +621,25 @@ export function createScene(engine, canvas) {
             Math.cos(tank.rotation.y)
         );
         
-        // --- COULEUR GRISE POUR LES BALLES ---
         const mat = new BABYLON.StandardMaterial("bulletMat", scene);
-        mat.emissiveColor = new BABYLON.Color3(0.6, 0.6, 0.6); // Gris clair
+        mat.emissiveColor = new BABYLON.Color3(0.6, 0.6, 0.6);
         mat.diffuseColor = new BABYLON.Color3(0.5, 0.5, 0.5);
         bullet.material = mat;
         
         bullets.push(bullet);
 
         try {
-            // Prefer BABYLON.Sound if loaded, otherwise fallback to HTMLAudioElement
-            const engineAudioCtx = (scene.getEngine && scene.getEngine().audioEngine && scene.getEngine().audioEngine.audioContext) || null;
             if (shootLoaded && shootSound && typeof shootSound.play === 'function') {
                 shootSound.play();
             } else {
-                // try HTMLAudioElement fallback
                 shootAudioEl.currentTime = 0;
                 const p = shootAudioEl.play();
                 if (p && p.catch) p.catch(() => {});
             }
-    } catch (e) { /* silent */ }
+        } catch (e) { /* silent */ }
     }
 
-    /* ================= 10. ENNEMIS ================= */
+    /* ================= 10. ENNEMIS (FSM + TYPES) ================= */
     const enemies = [];
     let baseDude = null;
     let baseSkeleton = null;
@@ -685,6 +688,42 @@ export function createScene(engine, canvas) {
 
         let animSpeed = 1.0 + (currentWave * 0.1);
         scene.beginAnimation(zombie.skeleton, 0, 100, true, animSpeed); 
+
+        // --- IA FSM : Attribution d'état initial et de type ---
+        zombie.aiState = EnemyState.PATROL;
+        zombie.patrolTarget = getRandomPatrolTarget();
+        zombie.stateTimer = 0;
+        zombie.flankDirection = Math.random() < 0.5 ? 1 : -1;
+        zombie.hp = 1;
+
+        // Choix du type selon la vague en cours
+        const roll = Math.random();
+        if (currentWave >= 5 && roll < 0.15) {
+            // --- CHARGER : gros, résistant, charge brutale ---
+            zombie.enemyType = 'charger';
+            zombie.hp = 3;
+            zombie.scaling.setAll(0.07);
+            zombie.getChildMeshes().forEach(m => {
+                if (m.material) {
+                    const mat = m.material.clone("chargerMat_" + Math.random());
+                    mat.emissiveColor = new BABYLON.Color3(0.5, 0.1, 0);
+                    m.material = mat;
+                }
+            });
+        } else if (currentWave >= 3 && roll < 0.35) {
+            // --- FLANKER : contourne le joueur, teinte violette ---
+            zombie.enemyType = 'flanker';
+            zombie.getChildMeshes().forEach(m => {
+                if (m.material) {
+                    const mat = m.material.clone("flankerMat_" + Math.random());
+                    mat.emissiveColor = new BABYLON.Color3(0.3, 0, 0.5);
+                    m.material = mat;
+                }
+            });
+        } else {
+            // --- RUSHER : comportement classique (seek) ---
+            zombie.enemyType = 'rusher';
+        }
 
         enemies.push(zombie);
     }
@@ -771,7 +810,6 @@ export function createScene(engine, canvas) {
             waveText.text = "VAGUE: " + currentWave;
         }
         
-        // Vitesse max du zombie (augmente avec les vagues)
         let zombieSpeedMax = 3.5 + (currentWave * 0.5);
         if (zombieSpeedMax > 9) zombieSpeedMax = 9;
 
@@ -823,26 +861,21 @@ export function createScene(engine, canvas) {
             }
         }
 
-        // =======================================================
-        // --- PHYSIQUE DU TANK (Inertie & Friction) ---
-        // =======================================================
-        
-        const ACCELERATION = 70; // Force du moteur
-        const FRICTION = 10;     // Résistance du sol
-        let maxSpeed = speedBoostActive ? 16 : 8; // Vitesse de pointe
-        if (dashActive) maxSpeed = speedBoostActive ? 40 : 25; // Limite pendant le dash
+        // --- PHYSIQUE DU TANK ---
+        const ACCELERATION = 70;
+        const FRICTION = 10;
+        let maxSpeed = speedBoostActive ? 16 : 8;
+        if (dashActive) maxSpeed = speedBoostActive ? 40 : 25;
 
-        const TURN_ACCEL = 10;   // Force pour tourner
-        const TURN_FRICTION = 15; // Résistance des chenilles quand on arrête de tourner
-        const MAX_TURN = 3;      // Vitesse max de rotation
+        const TURN_ACCEL = 10;
+        const TURN_FRICTION = 15;
+        const MAX_TURN = 3;
 
-        // 1. Calcul de la rotation (Gauche / Droite)
         if (inputMap["q"] || inputMap["a"]) {
             tankTurnVelocity -= TURN_ACCEL * dt;
         } else if (inputMap["d"]) {
             tankTurnVelocity += TURN_ACCEL * dt;
         } else {
-            // S'applique quand on lâche les touches (Friction)
             if (tankTurnVelocity > 0) {
                 tankTurnVelocity -= TURN_FRICTION * dt;
                 if (tankTurnVelocity < 0) tankTurnVelocity = 0;
@@ -853,17 +886,14 @@ export function createScene(engine, canvas) {
             }
         }
 
-        // Clamp (limitation) de la vitesse de rotation
         if (tankTurnVelocity > MAX_TURN) tankTurnVelocity = MAX_TURN;
         if (tankTurnVelocity < -MAX_TURN) tankTurnVelocity = -MAX_TURN;
 
-        // 2. Calcul de l'avancement (Avant / Arrière)
         if (inputMap["z"] || inputMap["w"]) {
             tankVelocity += ACCELERATION * dt;
         } else if (inputMap["s"]) {
             tankVelocity -= ACCELERATION * dt;
         } else {
-            // S'applique quand on lâche les touches (Glissade/Friction)
             if (tankVelocity > 0) {
                 tankVelocity -= FRICTION * dt;
                 if (tankVelocity < 0) tankVelocity = 0;
@@ -874,44 +904,37 @@ export function createScene(engine, canvas) {
             }
         }
 
-        // Clamp de la vitesse max
         if (tankVelocity > maxSpeed) tankVelocity = maxSpeed;
-        if (tankVelocity < -maxSpeed * 0.8) tankVelocity = -maxSpeed * 0.8; // Marche arrière plus lente que l'avant
+        if (tankVelocity < -maxSpeed * 0.8) tankVelocity = -maxSpeed * 0.8;
 
-        // --- ANIMATION DE LA POUSSIERE SELON LA VITESSE ---
         if (Math.abs(tankVelocity) > 2) {
             dustParticles.emitRate = 150 * (Math.abs(tankVelocity) / maxSpeed);
         } else {
             dustParticles.emitRate = 0; 
         }
 
-        // 3. Application des forces sur le Tank
         tank.rotation.y += tankTurnVelocity * dt;
         
-        // --- COLLISION AVEC LES OBSTACLES ---
         const oldX = tank.position.x;
         const oldZ = tank.position.z;
 
-        // Étape A : On teste le déplacement sur X
         tank.position.x += tankVelocity * Math.sin(tank.rotation.y) * dt;
         for (let obstacle of obstacles) {
             if (tank.intersectsMesh(obstacle, false)) {
-                tank.position.x = oldX; // On annule le mouvement X
-                tankVelocity *= 0.8;    // On ralentit à l'impact, mais sans bloquer à 0
+                tank.position.x = oldX;
+                tankVelocity *= 0.8;
                 break;
             }
         }
 
-        // Étape B : On teste le déplacement sur Z
         tank.position.z += tankVelocity * Math.cos(tank.rotation.y) * dt;
         for (let obstacle of obstacles) {
             if (tank.intersectsMesh(obstacle, false)) {
-                tank.position.z = oldZ; // On annule le mouvement Z
-                tankVelocity *= 0.8;    // On ralentit
+                tank.position.z = oldZ;
+                tankVelocity *= 0.8;
                 break;
             }
         }
-        // ---------------------------------------------
 
         shootCooldown -= dt;
         let limit = rapidFireActive ? 0.05 : COOLDOWN_TIME;
@@ -939,13 +962,12 @@ export function createScene(engine, canvas) {
                 setTimeout(() => bonusText.text = "", 2000);
 
                 try {
-                    const engineAudioCtx = (scene.getEngine && scene.getEngine().audioEngine && scene.getEngine().audioEngine.audioContext) || null;
                     if (bonusLoaded && bonusSound && typeof bonusSound.play === 'function') {
                         bonusSound.play();
                     } else {
                         bonusAudioEl.currentTime = 0;
-                        const p = bonusAudioEl.play();
-                        if (p && p.catch) p.catch(() => {});
+                        const pr = bonusAudioEl.play();
+                        if (pr && pr.catch) pr.catch(() => {});
                     }
                 } catch (e) { /* silent */ }
 
@@ -980,94 +1002,231 @@ export function createScene(engine, canvas) {
             }
         }
 
-        // --- GESTION ENNEMIS (AVEC IA SEEK + ARRIVAL + FLOCKING) ---
+        // =====================================================
+        // --- GESTION ENNEMIS (FSM + SEEK + ARRIVAL + FLOCKING) ---
+        // =====================================================
         for (let i = enemies.length - 1; i >= 0; i--) {
             const enemy = enemies[i];
             
             if (!enemiesFrozen) {
-                // 1. Direction vers la cible
-                let desiredVelocity = tank.position.subtract(enemy.position);
-                desiredVelocity.y = 0; 
-                
-                // --- IA ARRIVAL ---
-                let distanceToTank = desiredVelocity.length();
-                let slowingRadius = 8.0; 
-                let currentSpeed = zombieSpeedMax;
-                
-                if (distanceToTank < slowingRadius) {
-                    currentSpeed = zombieSpeedMax * (distanceToTank / slowingRadius);
-                    if (currentSpeed < 1.0) currentSpeed = 1.0; 
-                }
-                
-                let dir = desiredVelocity.normalize();
-                
-                let targetPos = tank.position.clone();
-                targetPos.y = enemy.position.y;
-                enemy.lookAt(targetPos, Math.PI); 
+                let distanceToTank = BABYLON.Vector3.Distance(
+                    new BABYLON.Vector3(enemy.position.x, 0, enemy.position.z),
+                    new BABYLON.Vector3(tank.position.x, 0, tank.position.z)
+                );
 
-                // 3. FLOCKING
+                // =====================
+                // MISE A JOUR FSM
+                // =====================
+                enemy.stateTimer += dt;
+
+                switch (enemy.aiState) {
+                    case EnemyState.PATROL:
+                        // Détection du joueur → passe en chasse
+                        if (distanceToTank < 25) {
+                            enemy.aiState = EnemyState.CHASE;
+                            enemy.stateTimer = 0;
+                        }
+                        break;
+
+                    case EnemyState.CHASE:
+                        // Flanker : contourne quand à mi-distance
+                        if (enemy.enemyType === 'flanker' && distanceToTank < 15 && distanceToTank > 5) {
+                            enemy.aiState = EnemyState.FLANK;
+                            enemy.stateTimer = 0;
+                        }
+                        // Charger : charge quand assez proche
+                        if (enemy.enemyType === 'charger' && distanceToTank < 12) {
+                            enemy.aiState = EnemyState.CHARGE;
+                            enemy.stateTimer = 0;
+                        }
+                        // Si le joueur s'éloigne trop → retour patrouille
+                        if (distanceToTank > 35) {
+                            enemy.aiState = EnemyState.PATROL;
+                            enemy.patrolTarget = getRandomPatrolTarget();
+                            enemy.stateTimer = 0;
+                        }
+                        break;
+
+                    case EnemyState.FLANK:
+                        // Contournement pendant 3s puis retour en chasse
+                        if (enemy.stateTimer > 3.0 || distanceToTank < 4) {
+                            enemy.aiState = EnemyState.CHASE;
+                            enemy.stateTimer = 0;
+                        }
+                        break;
+
+                    case EnemyState.CHARGE:
+                        // La charge dure 2s max
+                        if (enemy.stateTimer > 2.0) {
+                            enemy.aiState = EnemyState.CHASE;
+                            enemy.stateTimer = 0;
+                        }
+                        break;
+                }
+
+                // =====================
+                // CALCUL DU MOUVEMENT SELON L'ÉTAT
+                // =====================
+                let dir = new BABYLON.Vector3(0, 0, 0);
+                let currentSpeed = zombieSpeedMax;
+
+                switch (enemy.aiState) {
+                    case EnemyState.PATROL: {
+                        // Marche vers un point aléatoire
+                        let toTarget = enemy.patrolTarget.subtract(enemy.position);
+                        toTarget.y = 0;
+                        if (toTarget.length() < 2) {
+                            enemy.patrolTarget = getRandomPatrolTarget();
+                        }
+                        dir = toTarget.normalize();
+                        currentSpeed = zombieSpeedMax * 0.4; // Patrouille lente
+                        break;
+                    }
+
+                    case EnemyState.CHASE: {
+                        // Seek + Arrival classique
+                        let desiredVelocity = tank.position.subtract(enemy.position);
+                        desiredVelocity.y = 0;
+                        let slowingRadius = 8.0;
+                        if (distanceToTank < slowingRadius) {
+                            currentSpeed = zombieSpeedMax * (distanceToTank / slowingRadius);
+                            if (currentSpeed < 1.0) currentSpeed = 1.0;
+                        }
+                        dir = desiredVelocity.normalize();
+                        break;
+                    }
+
+                    case EnemyState.FLANK: {
+                        // Se déplace perpendiculairement au joueur pour contourner
+                        let toTank = tank.position.subtract(enemy.position);
+                        toTank.y = 0;
+                        let perpendicular = new BABYLON.Vector3(-toTank.z, 0, toTank.x).normalize();
+                        let forward = toTank.normalize().scale(0.3);
+                        let side = perpendicular.scale(enemy.flankDirection);
+                        dir = forward.add(side).normalize();
+                        currentSpeed = zombieSpeedMax * 0.9;
+                        break;
+                    }
+
+                    case EnemyState.CHARGE: {
+                        // Fonce très vite en ligne droite
+                        let toTank = tank.position.subtract(enemy.position);
+                        toTank.y = 0;
+                        dir = toTank.normalize();
+                        currentSpeed = zombieSpeedMax * 1.8; // Charge rapide !
+                        break;
+                    }
+                }
+
+                // =====================
+                // SEPARATION (Flocking)
+                // =====================
                 let separationForce = new BABYLON.Vector3(0, 0, 0);
                 for (let k = 0; k < enemies.length; k++) {
                     if (i !== k) {
                         const otherEnemy = enemies[k];
                         const dist = BABYLON.Vector3.Distance(enemy.position, otherEnemy.position);
-                        const minDistance = 2.5; 
-
+                        const minDistance = 2.5;
                         if (dist < minDistance && dist > 0.001) {
                             let pushDir = enemy.position.subtract(otherEnemy.position);
-                            pushDir.y = 0; 
+                            pushDir.y = 0;
                             pushDir.normalize();
                             pushDir.scaleInPlace(minDistance - dist);
                             separationForce.addInPlace(pushDir);
                         }
                     }
                 }
-                
+
                 dir.addInPlace(separationForce.scale(2.5));
-                dir.y = 0; 
-                dir.normalize(); 
-                
-                enemy.position.addInPlace(dir.scale(currentSpeed * dt)); 
-                enemy.position.y = 0; 
+                dir.y = 0;
+                dir.normalize();
+
+                enemy.position.addInPlace(dir.scale(currentSpeed * dt));
+                enemy.position.y = 0;
+
+                // Orientation : regarde la direction de marche en patrouille, sinon regarde le tank
+                let lookTarget;
+                if (enemy.aiState === EnemyState.PATROL) {
+                    lookTarget = enemy.position.add(dir);
+                } else {
+                    lookTarget = tank.position.clone();
+                }
+                lookTarget.y = enemy.position.y;
+                enemy.lookAt(lookTarget, Math.PI);
             }
 
+            // =====================
+            // COLLISION BALLES → ENNEMI
+            // =====================
             let enemyDead = false;
 
             for (let j = bullets.length - 1; j >= 0; j--) {
                 const b = bullets[j];
                 if (b.intersectsMesh(enemy.hitbox, true)) {
-                    score += 10;
-                    scoreText.text = "SCORE: " + score;
-
-                    if (score > highScore) {
-                        highScore = score;
-                        localStorage.setItem('tankSurvivalHighScore', highScore.toString());
-                        highScoreText.text = "RECORD: " + highScore;
-                        menuHighScoreText.text = "🏆 MEILLEUR SCORE: " + highScore;
-                    }
-
-                    // --- Suppression du son d'explosion ---
-                    showFloatingText("+10", enemy.position.clone()); 
-                    createExplosion(enemy.position.clone()); 
                     
-                    enemy.hitbox.dispose();
-                    enemy.dispose();
+                    // Réduire les HP (chargers ont plusieurs PV)
+                    enemy.hp -= 1;
+
                     b.dispose();
-                    enemies.splice(i, 1);
                     bullets.splice(j, 1);
-                    spawnEnemy();
-                    enemyDead = true;
+
+                    if (enemy.hp <= 0) {
+                        // Ennemi mort
+                        let points = 10;
+                        if (enemy.enemyType === 'flanker') points = 15;
+                        if (enemy.enemyType === 'charger') points = 25;
+
+                        score += points;
+                        scoreText.text = "SCORE: " + score;
+
+                        if (score > highScore) {
+                            highScore = score;
+                            localStorage.setItem('tankSurvivalHighScore', highScore.toString());
+                            highScoreText.text = "RECORD: " + highScore;
+                            menuHighScoreText.text = "🏆 MEILLEUR SCORE: " + highScore;
+                        }
+
+                        showFloatingText("+" + points, enemy.position.clone());
+                        createExplosion(enemy.position.clone());
+
+                        enemy.hitbox.dispose();
+                        enemy.dispose();
+                        enemies.splice(i, 1);
+                        spawnEnemy();
+                        enemyDead = true;
+                    } else {
+                        // Ennemi touché mais pas mort → flash rouge + texte
+                        showFloatingText("HIT!", enemy.position.clone());
+                        // Flash visuel sur le charger quand il est touché
+                        enemy.getChildMeshes().forEach(m => {
+                            if (m.material) {
+                                const originalEmissive = m.material.emissiveColor.clone();
+                                m.material.emissiveColor = new BABYLON.Color3(1, 0, 0);
+                                setTimeout(() => {
+                                    if (m.material) m.material.emissiveColor = originalEmissive;
+                                }, 150);
+                            }
+                        });
+                    }
                     break;
                 }
             }
-            if (enemyDead) continue; 
+            if (enemyDead) continue;
 
+            // =====================
+            // COLLISION ENNEMI → TANK
+            // =====================
             if (enemy.hitbox.intersectsMesh(tank, true)) {
-                lives--;
+                // Les chargers font 2 dégâts au contact
+                let damage = 1;
+                if (enemy.enemyType === 'charger') damage = 2;
+
+                lives -= damage;
                 livesText.text = "VIES: " + lives;
                 
-                if (lives === 2) livesText.color = "orange";
-                if (lives === 1) livesText.color = "red";
+                if (lives >= 3) livesText.color = "#008800";
+                else if (lives === 2) livesText.color = "orange";
+                else if (lives >= 1) livesText.color = "red";
 
                 triggerDamageEffect();
 
@@ -1075,7 +1234,7 @@ export function createScene(engine, canvas) {
                 enemy.hitbox.dispose();
                 enemy.dispose();
                 enemies.splice(i, 1);
-                spawnEnemy(); 
+                spawnEnemy();
 
                 if (lives <= 0) { resetGame(); return; }
             }
